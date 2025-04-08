@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@know/types": ["packages/types"],
+      "@/components/*": ["apps/web/components/*"],
+      "@/styles/*": ["apps/web/styles/*"]
+    }
+  }
+}

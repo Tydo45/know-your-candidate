@@ -1,0 +1,30 @@
+# === Node / Frontend ===
+node_modules/
+.pnpm-debug.log
+.npmrc
+pnpm-lock.yaml
+.next/
+dist/
+.env.local
+.turbo/
+
+# === Python / Backend ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+.env
+.venv/
+*.egg-info/
+pip-wheel-metadata/
+db.sqlite3
+
+# === VS Code / Dev ===
+.vscode/
+.DS_Store
+*.log
+
+# === OS / Misc ===
+*.swp
+Thumbs.db
