@@ -11,10 +11,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# DEBUG
-print("OPENAI_BASE_URL =", os.getenv("OPENAI_BASE_URL"))
-print("OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
-
 client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL"),
     api_key=os.getenv("OPENAI_API_KEY")

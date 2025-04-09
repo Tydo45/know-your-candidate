@@ -1,6 +1,6 @@
 import { useRouter } from "next/router"
 import { useEffect, useState } from "react"
-import type { Candidate, Stance } from "@know/types"
+import type { Candidate } from "@know/types"
 
 function getInitials(name: string): string {
   return name
@@ -92,7 +92,7 @@ export default function ComparePage() {
               <div>
                 <h2 className="text-xl font-semibold">{c.name}</h2>
                 <p className="text-sm text-gray-600">{c.office}</p>
-                <p className="text-sm text-gray-500">{c.party}</p>
+                <p className="text-sm text-gray-500">{c.party?.value}</p>
                 {c.is_incumbent && (
                   <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded mt-1 inline-block">
                     Incumbent
