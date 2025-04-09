@@ -1,60 +1,69 @@
-import requests
 import argparse
-import os
-from dotenv import load_dotenv
-from pathlib import Path
-from scrape_candidate import search_duckduckgo, pick_best_url, scrape_bio_text
+import requests
+import json
+from scrape_candidate import scrape_candidate_website
 
-# Load .env from parent directory
-env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=env_path)
+def call_llm_generate_summary(name: str, office: str, bio_text: str) -> dict:
+    print("🔁 Sending text to LLM for summarization...")
+    res = requests.post(
+        "http://localhost:8000/generate-summary",
+        json={
+            "name": name,
+            "office": office,
+            "bio_text": bio_text,
+        }
+    )
+    res.raise_for_status()
+    return res.json()
 
-API_BASE_URL = os.getenv("API_BASE_URL")
-
-def generate_summary(name, office, bio_text):
-    payload = {
-        "name": name,
-        "office": office,
-        "bio_text": bio_text
-    }
-    response = requests.post(f"{API_BASE_URL}/generate-summary", json=payload)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        raise Exception(f"Summary generation failed: {response.status_code}, {response.text}")
-
-def save_candidate(summary):
-    response = requests.post(f"{API_BASE_URL}/candidates/", json=summary)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        raise Exception(f"Saving candidate failed: {response.status_code}, {response.text}")
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True, help="Candidate name")
-    parser.add_argument("--office", required=True, help="Office the candidate is running for")
-    parser.add_argument("--allow-fallback", action="store_true", help="Allow fallback sources for scraping")
-    parser.add_argument("--use-llm", action="store_true", help="Use LLM to verify official URL")
+    parser.add_argument("--office", required=True, help="Office they're running for")
+    parser.add_argument("--use-llm", action="store_true", help="Use LLM to rank sites")
+    parser.add_argument("--dry-run", action="store_true", help="Only print the final candidate payload (no POST)")
+
     args = parser.parse_args()
+    name = args.name
+    office = args.office
+    use_llm = args.use_llm
+    dry_run = args.dry_run
 
-    print(f"🔍 Scraping official website for: {args.name}")
+    # Step 1: Scrape website & extract bio
+    site, bio_text = scrape_candidate_website(name, use_llm=use_llm)
+    if not bio_text:
+        print("⚠️ No bio text found — skipping.")
+        return
 
-    results = search_duckduckgo(args.name, allow_fallback=args.allow_fallback)
-    best_url = pick_best_url(results, args.name, args.use_llm, args.allow_fallback)
+    print("📝 Scraped Bio Text:")
+    print(bio_text[:400] + ("..." if len(bio_text) > 400 else ""))
+    print()
 
-    if not best_url:
-        print("❌ No suitable official website found.")
-        exit(1)
+    # Step 2: Summarize with LLM
+    summary_result = call_llm_generate_summary(name, office, bio_text)
 
-    bio_text = scrape_bio_text(best_url)
-    print(f"✅ Bio text scraped from {best_url[:50]}...")
+    print("✅ LLM Summary Result:")
+    print(json.dumps(summary_result, indent=2))
+    print()
 
-    print("🧠 Generating summary via LLM...")
-    summary = generate_summary(args.name, args.office, bio_text)
+    # Step 3: Build full candidate payload
+    candidate_payload = {
+        "name": name,
+        "office": office,
+        "bio_text": bio_text,
+        "party": summary_result.get("party", "Unknown"),
+        "past_positions": [],  # optionally extracted later
+        "stance_summary": summary_result.get("stance_summary", [])
+    }
 
-    print("💾 Saving candidate to database...")
-    save_response = save_candidate(summary)
+    if dry_run:
+        print("🧪 [Dry Run] Candidate payload:")
+        print(json.dumps(candidate_payload, indent=2))
+    else:
+        print("📤 Posting candidate to backend...")
+        res = requests.post("http://localhost:8000/candidates/", json=candidate_payload)
+        res.raise_for_status()
+        print("✅ Candidate created:", res.json())
 
-    print(f"🎉 Candidate '{args.name}' successfully saved.")
-    print(f"Candidate ID: {save_response.get('id')}")
+if __name__ == "__main__":
+    main()

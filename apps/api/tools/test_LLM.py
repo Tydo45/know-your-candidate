@@ -14,12 +14,12 @@ client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
-prompt = "Respond with \'Hello\'"
+prompt = "Give me some fun pool team name ideas for a team that sucks at pool"
 
 response = client.chat.completions.create(
     model="meta/llama-3.3-70b-instruct",
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=1
+    max_tokens=1000
 )
 
-choice = response.choices[0].message.content.strip()
+print(response.choices[0].message.content.strip())

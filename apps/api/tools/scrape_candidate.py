@@ -33,8 +33,6 @@ def score_url(url, name, allow_fallback=False):
     url = url.lower()
     name_parts = name.lower().split()
     score = 0
-    
-    print(url)
 
     if not allow_fallback:
         if ".com" not in url:
@@ -105,6 +103,16 @@ def pick_best_url(results, candidate_name, use_llm, allow_fallback):
                 best_url = r['url']
         return best_url
 
+# ✅ NEW FUNCTION for importing
+def scrape_candidate_website(name: str, use_llm: bool = False, allow_fallback: bool = False) -> tuple[str, str]:
+    results = search_duckduckgo(name, allow_fallback=allow_fallback)
+    best_url = pick_best_url(results, name, use_llm=use_llm, allow_fallback=allow_fallback)
+    if best_url:
+        bio = scrape_bio_text(best_url)
+        return (best_url, bio)
+    return (None, "")
+
+# CLI still works
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True, help="Candidate name")
@@ -113,16 +121,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     candidate_name = args.name
-    results = search_duckduckgo(candidate_name, allow_fallback=args.allow_fallback)
-    best_url = pick_best_url(results, candidate_name, use_llm=args.use_llm, allow_fallback=args.allow_fallback)
+    url, bio = scrape_candidate_website(candidate_name, use_llm=args.use_llm, allow_fallback=args.allow_fallback)
 
-    if best_url:
-        bio = scrape_bio_text(best_url)
-        print("\n🔎 Candidate Scrape Result:")
-        print(f"Name: {candidate_name}")
-        print(f"Chosen URL: {best_url}")
-        print(f"\n📄 Bio:\n{bio[:1000]}...")
-    else:
-        print("\n🔎 Candidate Scrape Result:")
-        print(f"Name: {candidate_name}")
-        print("No suitable URL found.")
+    print("\n🔎 Candidate Scrape Result:")
+    print(f"Name: {candidate_name}")
+    print(f"Chosen URL: {url or 'None'}")
+    print(f"\n📄 Bio:\n{bio[:1000]}...")
