@@ -3,9 +3,13 @@ from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
 import argparse
 import os
+import json
+import random
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
 from pathlib import Path
+from slugify import slugify  # pip install python-slugify
 
 # Load .env from parent directory
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -15,43 +19,40 @@ client = None
 if os.getenv("LLAMA_BASE_URL") and os.getenv("LLAMA_API_KEY"):
     client = OpenAI(base_url=os.getenv("LLAMA_BASE_URL"), api_key=os.getenv("LLAMA_API_KEY"))
 
-def scrape_bio_text(url):
-    try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n")
-        lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 60]
-        return "\n".join(lines[:20])
-    except Exception as e:
-        return f"Error scraping {url}: {e}"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    "Mozilla/5.0 (X11; Linux x86_64)",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_2 like Mac OS X)"
+]
 
-def score_url(url, name, allow_fallback=False):
-    if not url:
-        return -1
+def classify_source_type(url: str, title: str = "", snippet: str = "") -> str:
     url = url.lower()
-    name_parts = name.lower().split()
-    score = 0
+    title = title.lower()
+    snippet = snippet.lower()
 
-    if not allow_fallback:
-        if ".com" not in url:
-            return -1
-        if any(bad in url for bad in ["ballotpedia", "pbs", "wikipedia", ".gov", "linkedin", "youtube", "facebook", "x.com"]):
-            return -1
-        if not any(part in url for part in name_parts):
-            return -1
+    if "ballotpedia.org" in url:
+        return "ballotpedia"
+    if any(social in url for social in ["twitter.com", "facebook.com", "instagram.com", "linkedin.com"]):
+        return "social"
+    if any(news in url for news in ["npr.org", "apnews.com", "reuters.com", "politico.com", "nytimes.com"]):
+        return "news"
+    if "official" in title or "campaign" in title or "elect" in url or "vote" in url:
+        return "official"
+    if any(keyword in snippet for keyword in ["platform", "endorsement", "running for", "candidate"]):
+        return "news"
+    return "unknown"
 
-    if "for" in url or "elect" in url or "vote" in url:
-        score += 2
-    if "senate" in url or "house" in url or "justice" in url or "court" in url:
-        score += 1
-    if all(part in url for part in name_parts):
-        score += 3
+def search_duckduckgo(candidate_name: str, allow_fallback=False, force_refresh=False):
+    os.makedirs(".search_cache", exist_ok=True)
+    cache_file = f".search_cache/{slugify(candidate_name)}.json"
 
-    return score
+    if not force_refresh and os.path.exists(cache_file):
+        with open(cache_file, "r") as f:
+            print("💾 Loaded search results from cache.")
+            return json.load(f)
 
-def search_duckduckgo(candidate_name, allow_fallback=False):
+    print("🌐 Performing live DuckDuckGo search...")
     queries = [
         f"{candidate_name} official campaign site",
         f"{candidate_name} official site",
@@ -61,69 +62,99 @@ def search_duckduckgo(candidate_name, allow_fallback=False):
     ]
 
     results = []
+    headers = { "User-Agent": random.choice(USER_AGENTS) }
+
     with DDGS() as ddgs:
         for query in queries:
             search_results = ddgs.text(query, max_results=5)
             for res in search_results:
                 url = res.get("href") or res.get("url")
-                title = res.get("title")
-                snippet = res.get("body")
-                results.append({"title": title, "url": url, "snippet": snippet})
+                title = res.get("title", "")
+                snippet = res.get("body", "")
+                source_type = classify_source_type(url, title, snippet)
 
-    return results[:5]
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                    "type": source_type
+                })
 
-def ask_llama_for_best_url(results, candidate_name):
-    prompt = f"Given these search results for {candidate_name}, identify which number is the official campaign website:\n\n"
-    for idx, result in enumerate(results, start=1):
-        prompt += f"{idx}. Title: {result['title']}\nURL: {result['url']}\nSnippet: {result['snippet']}\n\n"
-    prompt += "Respond ONLY with the number of the best official campaign website. If unsure, respond with '0'."
+            time.sleep(random.uniform(1.5, 3.0))  # Avoid rate limits
 
-    response = client.chat.completions.create(
-        model="llama-3.3-instruct",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1
-    )
+    with open(cache_file, "w") as f:
+        json.dump(results, f, indent=2)
+        print(f"📁 Cached search results → {cache_file}")
 
-    choice = response.choices[0].message.content.strip()
-    return int(choice) if choice.isdigit() else 0
+    return results[:10]
 
-def pick_best_url(results, candidate_name, use_llm, allow_fallback):
-    if use_llm and client:
-        choice = ask_llama_for_best_url(results, candidate_name)
-        if choice > 0:
-            return results[choice - 1]['url']
-        return None
-    else:
-        best_score = -1
-        best_url = None
-        for r in results:
-            score = score_url(r['url'], candidate_name, allow_fallback)
-            if score > best_score:
-                best_score = score
-                best_url = r['url']
-        return best_url
+def scrape_bio_text(url):
+    try:
+        headers = { "User-Agent": random.choice(USER_AGENTS) }
+        response = requests.get(url, timeout=10, headers=headers)
+        soup = BeautifulSoup(response.text, "html.parser")
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n")
+        lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 60]
+        return "\n".join(lines[:20])
+    except Exception as e:
+        return f"Error scraping {url}: {e}"
 
-# ✅ NEW FUNCTION for importing
-def scrape_candidate_website(name: str, use_llm: bool = False, allow_fallback: bool = False) -> tuple[str, str]:
-    results = search_duckduckgo(name, allow_fallback=allow_fallback)
-    best_url = pick_best_url(results, name, use_llm=use_llm, allow_fallback=allow_fallback)
-    if best_url:
-        bio = scrape_bio_text(best_url)
-        return (best_url, bio)
-    return (None, "")
+def scrape_candidate_sources(name: str, use_llm: bool = False, allow_fallback: bool = False, force_refresh: bool = False) -> dict:
+    results = search_duckduckgo(name, allow_fallback=allow_fallback, force_refresh=force_refresh)
 
-# CLI still works
+    print("\n🔎 Classified Search Results:")
+    for r in results:
+        print(f"[{r['type'].upper():10}] {r['title']}\n→ {r['url']}\n")
+
+    sources = {
+        "official": None,
+        "ballotpedia": None,
+        "news": []
+    }
+
+    for result in results:
+        url = result["url"]
+        kind = result["type"]
+
+        if kind == "official" and sources["official"] is None:
+            text = scrape_bio_text(url)
+            sources["official"] = { "url": url, "text": text }
+
+        elif kind == "ballotpedia" and sources["ballotpedia"] is None:
+            text = scrape_bio_text(url)
+            sources["ballotpedia"] = { "url": url, "text": text }
+
+        elif kind == "news":
+            text = scrape_bio_text(url)
+            sources["news"].append({ "url": url, "text": text })
+
+    return sources
+
+# CLI
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True, help="Candidate name")
     parser.add_argument("--allow-fallback", action="store_true", help="Allow fallback to non-official sources")
     parser.add_argument("--use-llm", action="store_true", help="Use LLM to select best URL")
+    parser.add_argument("--force-refresh", action="store_true", help="Force re-run search (ignore cache)")
     args = parser.parse_args()
 
     candidate_name = args.name
-    url, bio = scrape_candidate_website(candidate_name, use_llm=args.use_llm, allow_fallback=args.allow_fallback)
+    sources = scrape_candidate_sources(
+        candidate_name,
+        use_llm=args.use_llm,
+        allow_fallback=args.allow_fallback,
+        force_refresh=args.force_refresh
+    )
 
-    print("\n🔎 Candidate Scrape Result:")
-    print(f"Name: {candidate_name}")
-    print(f"Chosen URL: {url or 'None'}")
-    print(f"\n📄 Bio:\n{bio[:1000]}...")
+    print("\n📦 Final Scraped Sources Summary:")
+    for key, val in sources.items():
+        if val is None:
+            print(f"{key.upper()}: ❌ Not Found")
+        elif isinstance(val, list):
+            print(f"{key.upper()}: {len(val)} item(s)")
+        else:
+            preview = val['text'][:300].replace("\n", " ") + "..."
+            print(f"{key.upper()}: ✅ {val['url']}\n    → {preview}\n")

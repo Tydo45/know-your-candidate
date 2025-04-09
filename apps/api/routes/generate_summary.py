@@ -5,11 +5,15 @@ import json
 import os
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Dict, Union
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# DEBUG
+print("OPENAI_BASE_URL =", os.getenv("OPENAI_BASE_URL"))
+print("OPENAI_API_KEY =", os.getenv("OPENAI_API_KEY"))
 
 client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL"),
@@ -22,45 +26,79 @@ class IssueStance(BaseModel):
     issue: str
     position: str
 
+class SourcedStance(BaseModel):
+    value: IssueStance
+    source_url: str
+
+class SourcedStr(BaseModel):
+    value: str
+    source_url: str
+
+class SourceBlock(BaseModel):
+    url: str
+    text: str
+
 class CandidateRequest(BaseModel):
     name: str
     office: str
-    bio_text: str
+    sources: Dict[str, Union[SourceBlock, List[SourceBlock]]]
 
 class SummaryResponse(BaseModel):
-    party: str
-    stance_summary: List[IssueStance]
+    party: SourcedStr
+    past_positions: List[SourcedStr]
+    stance_summary: List[SourcedStance]
 
 @router.post("/generate-summary", response_model=SummaryResponse)
 def generate_summary(req: CandidateRequest):
+    # Reconstruct a combined LLM input
+    combined_text = ""
+    for source_type, data in req.sources.items():
+        if isinstance(data, dict):
+            url = data.get("url")
+            text = data.get("text")
+            if url and text:
+                combined_text += f"\n\n[{source_type.upper()}] ({url})\n{text}"
+        elif isinstance(data, list):
+            for idx, entry in enumerate(data):
+                if isinstance(entry, dict) and "url" in entry and "text" in entry:
+                    combined_text += f"\n\n[NEWS {idx+1}] ({entry['url']})\n{entry['text']}"
+
     prompt = f"""
-    You are an assistant that extracts political information from a candidate's biography.
+You are an assistant that extracts political candidate information from multiple sources, preserving source URLs.
 
-    BIO:
-    \"\"\"
-    {req.bio_text}
-    \"\"\"
+Candidate: {req.name}
+Office: {req.office}
 
-    Return ONLY valid JSON in the following format:
+Sources:
+\"\"\"
+{combined_text}
+\"\"\"
+
+Return valid JSON in this format:
+
+{{
+  "party": {{ "value": "Democratic", "source_url": "https://..." }},
+  "past_positions": [
+    {{ "value": "Deputy District Attorney", "source_url": "https://..." }}
+  ],
+  "stance_summary": [
     {{
-      "party": "PARTY_NAME",
-      "stance_summary": [
-        {{ "issue": "ISSUE_NAME", "position": "ISSUE_POSITION" }}
-      ]
+      "value": {{
+        "issue": "Public Schools",
+        "position": "Believes in Wisconsin's history of great public schools."
+      }},
+      "source_url": "https://..."
     }}
+  ]
+}}
 
-    Guidelines:
-    - For "party", use standardized values like "Democratic", "Republican", "Green", "Independent", or return "Unknown".
-    - Use only what is stated or clearly implied in the bio.
-    - Do not make assumptions — return "Unknown" if it's not mentioned.
-    - For "stance_summary", follow these rules:
-        - Use only issues mentioned or implied in the bio.
-        - Use standardized issue names (e.g. "Healthcare", "Education", "Climate").
-        - Each stance should describe what the candidate *supports, opposes, or has done* in a complete sentence.
-        - Avoid vague terms like "supportive" — be specific.
-
-    Respond ONLY with valid JSON — no extra text or commentary.
-    """
+Guidelines:
+- Only use information explicitly found in the sources.
+- Always include the source_url for each data point.
+- Return complete sentences for positions.
+- Return "Unknown" or an empty list where appropriate.
+- Do not include any explanation or commentary — just valid JSON.
+"""
 
     response = client.chat.completions.create(
         model="meta/llama-3.3-70b-instruct",
