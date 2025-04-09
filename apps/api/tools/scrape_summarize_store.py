@@ -6,12 +6,15 @@ import us
 
 def call_llm_generate_summary(name: str, office: str, sources: dict) -> dict:
     print("🔁 Sending text to LLM for summarization...")
+    
+    clean_sources = {k: v for k, v in sources.items() if v is not None}
+
     res = requests.post(
         "http://localhost:8000/generate-summary",
         json={
             "name": name,
             "office": office,
-            "sources": sources
+            "sources": clean_sources
         }
     )
     res.raise_for_status()
@@ -34,15 +37,17 @@ def main():
     parser.add_argument("--office", required=True, help="Office they're running for")
     parser.add_argument("--use-llm", action="store_true", help="Use LLM to rank sites")
     parser.add_argument("--dry-run", action="store_true", help="Only print the final candidate payload (no POST)")
+    parser.add_argument("--force-refresh", action="store_true", help="Force Refresh of Candidate Sources")
     args = parser.parse_args()
 
     name = args.name
     office = args.office
     use_llm = args.use_llm
     dry_run = args.dry_run
+    force_refresh = args.force_refresh
 
     # Step 1: Scrape sources
-    scraped = scrape_candidate_sources(name, use_llm=use_llm)
+    scraped = scrape_candidate_sources(name, use_llm=use_llm, force_refresh=force_refresh)
 
     # Step 2: Reformat for summary call
     sources_payload = {
@@ -79,13 +84,21 @@ def main():
         "state": state,
         "is_incumbent": is_incumbent,
         "bio_text": {
-        "value": sources_payload.get("official", {}).get("text", ""),
-        "source_url": sources_payload.get("official", {}).get("url", "")
+            "value": sources_payload.get("official", {}).get("text", ""),
+            "source_url": sources_payload.get("official", {}).get("url", "")
         },
         "party": summary.get("party", {}),
         "past_positions": summary.get("past_positions", []),
-        "stance_summary": summary.get("stance_summary", [])
+        "stance_summary": [
+            {
+                "issue": stance["value"]["issue"],
+                "position": stance["value"]["position"],
+                "source_url": stance["source_url"]
+            }
+            for stance in summary.get("stance_summary", [])
+        ]
     }
+
 
     if dry_run:
         print("🧪 [Dry Run] Candidate payload:")

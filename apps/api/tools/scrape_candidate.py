@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pathlib import Path
 from slugify import slugify  # pip install python-slugify
+from urllib.parse import urlparse
+from llm import call_llm
 
 # Load .env from parent directory
 env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -26,22 +28,32 @@ USER_AGENTS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 15_2 like Mac OS X)"
 ]
 
-def classify_source_type(url: str, title: str = "", snippet: str = "") -> str:
-    url = url.lower()
-    title = title.lower()
-    snippet = snippet.lower()
+def classify_source(url: str) -> str:
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
 
-    if "ballotpedia.org" in url:
-        return "ballotpedia"
-    if any(social in url for social in ["twitter.com", "facebook.com", "instagram.com", "linkedin.com"]):
-        return "social"
-    if any(news in url for news in ["npr.org", "apnews.com", "reuters.com", "politico.com", "nytimes.com"]):
-        return "news"
-    if "official" in title or "campaign" in title or "elect" in url or "vote" in url:
-        return "official"
-    if any(keyword in snippet for keyword in ["platform", "endorsement", "running for", "candidate"]):
-        return "news"
-    return "unknown"
+    if "ballotpedia.org" in domain:
+        return "BALLOTPEDIA"
+
+    domain_main = domain.replace("www.", "").split(".")[0]
+    return domain_main.upper()
+
+def identify_true_official(sources: list[dict], candidate_name: str) -> int:
+    numbered_list = "\n".join(
+        [f"{i+1}. {s['label']} - {s['url']}" for i, s in enumerate(sources)]
+    )
+    prompt = f"""
+Given the following list of websites about {candidate_name}, which one appears to be the candidate's official campaign website?
+
+Return ONLY the number of the best match.
+
+{numbered_list}
+"""
+    response = call_llm(prompt)
+    try:
+        return int(response.strip()) - 1
+    except:
+        return -1
 
 def search_duckduckgo(candidate_name: str, allow_fallback=False, force_refresh=False):
     os.makedirs(".search_cache", exist_ok=True)
@@ -71,13 +83,10 @@ def search_duckduckgo(candidate_name: str, allow_fallback=False, force_refresh=F
                 url = res.get("href") or res.get("url")
                 title = res.get("title", "")
                 snippet = res.get("body", "")
-                source_type = classify_source_type(url, title, snippet)
-
                 results.append({
                     "title": title,
                     "url": url,
-                    "snippet": snippet,
-                    "type": source_type
+                    "snippet": snippet
                 })
 
             time.sleep(random.uniform(1.5, 3.0))  # Avoid rate limits
@@ -102,11 +111,28 @@ def scrape_bio_text(url):
         return f"Error scraping {url}: {e}"
 
 def scrape_candidate_sources(name: str, use_llm: bool = False, allow_fallback: bool = False, force_refresh: bool = False) -> dict:
-    results = search_duckduckgo(name, allow_fallback=allow_fallback, force_refresh=force_refresh)
+    raw_results = search_duckduckgo(name, allow_fallback=allow_fallback, force_refresh=force_refresh)
+
+    # Label sources
+    labeled_results = []
+    for res in raw_results:
+        label = classify_source(res["url"])
+        labeled_results.append({
+            "label": label,
+            "title": res["title"],
+            "url": res["url"],
+            "snippet": res["snippet"]
+        })
+
+    # Pick official
+    if use_llm:
+        idx = identify_true_official(labeled_results, name)
+        if 0 <= idx < len(labeled_results):
+            labeled_results[idx]["label"] = "OFFICIAL"
 
     print("\n🔎 Classified Search Results:")
-    for r in results:
-        print(f"[{r['type'].upper():10}] {r['title']}\n→ {r['url']}\n")
+    for r in labeled_results:
+        print(f"[{r['label']:<10}] {r['title']}\n→ {r['url']}\n")
 
     sources = {
         "official": None,
@@ -114,19 +140,19 @@ def scrape_candidate_sources(name: str, use_llm: bool = False, allow_fallback: b
         "news": []
     }
 
-    for result in results:
+    for result in labeled_results:
         url = result["url"]
-        kind = result["type"]
+        label = result["label"].lower()
 
-        if kind == "official" and sources["official"] is None:
+        if label == "official" and sources["official"] is None:
             text = scrape_bio_text(url)
             sources["official"] = { "url": url, "text": text }
 
-        elif kind == "ballotpedia" and sources["ballotpedia"] is None:
+        elif label == "ballotpedia" and sources["ballotpedia"] is None:
             text = scrape_bio_text(url)
             sources["ballotpedia"] = { "url": url, "text": text }
 
-        elif kind == "news":
+        elif label not in ["official", "ballotpedia"]:
             text = scrape_bio_text(url)
             sources["news"].append({ "url": url, "text": text })
 
