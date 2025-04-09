@@ -4,13 +4,19 @@ import json
 from scrape_candidate import scrape_candidate_sources
 import us
 
-def call_llm_generate_summary(name: str, office: str, sources: dict) -> dict:
+def call_llm_generate_summary(name: str, office: str, sources: dict, use_chat_summary: bool = False) -> dict:
     print("🔁 Sending text to LLM for summarization...")
     
     clean_sources = {k: v for k, v in sources.items() if v is not None}
+    
+    url = "http://localhost:8000/generate-summary"
+    if use_chat_summary:
+        print("🧠 Using chat-style streaming summarizer...")
+    else:
+        print("📝 Using monolithic summarizer...")
 
     res = requests.post(
-        "http://localhost:8000/generate-summary",
+        url,
         json={
             "name": name,
             "office": office,
@@ -38,6 +44,7 @@ def main():
     parser.add_argument("--use-llm", action="store_true", help="Use LLM to rank sites")
     parser.add_argument("--dry-run", action="store_true", help="Only print the final candidate payload (no POST)")
     parser.add_argument("--force-refresh", action="store_true", help="Force Refresh of Candidate Sources")
+    parser.add_argument("--use-chat-summary", action="store_true", help="Use streaming/chat-based summary generation")
     args = parser.parse_args()
 
     name = args.name
@@ -45,6 +52,7 @@ def main():
     use_llm = args.use_llm
     dry_run = args.dry_run
     force_refresh = args.force_refresh
+    use_chat_summary = args.use_chat_summary
 
     # Step 1: Scrape sources
     scraped = scrape_candidate_sources(name, use_llm=use_llm, force_refresh=force_refresh)
@@ -63,9 +71,8 @@ def main():
         "sources": sources_payload
     }, indent=2))
 
-
     # Step 3: Generate summary
-    summary = call_llm_generate_summary(name, office, sources_payload)
+    summary = call_llm_generate_summary(name, office, sources_payload, use_chat_summary=use_chat_summary)
 
     print("✅ LLM Summary Result:")
     print(json.dumps(summary, indent=2))
@@ -77,6 +84,8 @@ def main():
     state = extract_state_from_office(office)
     is_incumbent = detect_incumbency(all_texts)
 
+    # Protect Against NoneType
+    official_source = sources_payload.get("official") or {}
     # Step 5: Build payload with source URLs
     candidate_payload = {
         "name": name,
@@ -84,8 +93,8 @@ def main():
         "state": state,
         "is_incumbent": is_incumbent,
         "bio_text": {
-            "value": sources_payload.get("official", {}).get("text", ""),
-            "source_url": sources_payload.get("official", {}).get("url", "")
+            "value":  official_source.get("text", ""),
+            "source_url": official_source.get("url", "")
         },
         "party": summary.get("party", {}),
         "past_positions": summary.get("past_positions", []),
@@ -98,7 +107,6 @@ def main():
             for stance in summary.get("stance_summary", [])
         ]
     }
-
 
     if dry_run:
         print("🧪 [Dry Run] Candidate payload:")

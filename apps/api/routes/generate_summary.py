@@ -3,7 +3,7 @@
 import re
 import json
 import os
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Union
 from openai import OpenAI
@@ -46,74 +46,80 @@ class SummaryResponse(BaseModel):
 
 @router.post("/generate-summary", response_model=SummaryResponse)
 def generate_summary(req: CandidateRequest):
-    # Reconstruct a combined LLM input
-    combined_text = ""
-    for source_type, data in req.sources.items():
-        if isinstance(data, dict):
-            url = data.get("url")
-            text = data.get("text")
-            if url and text:
-                combined_text += f"\n\n[{source_type.upper()}] ({url})\n{text}"
-        elif isinstance(data, list):
-            for idx, entry in enumerate(data):
-                if isinstance(entry, dict) and "url" in entry and "text" in entry:
-                    combined_text += f"\n\n[NEWS {idx+1}] ({entry['url']})\n{entry['text']}"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an assistant that extracts political candidate information from sources. "
+                f"Candidate: {req.name}, Office: {req.office}. "
+                "Maintain a running JSON summary of:\n"
+                "- Party affiliation (with source_url)\n"
+                "- Past positions (list with source_url)\n"
+                "- Issue stances (each with issue, position, source_url)\n"
+                "Only use information explicitly found in the source. "
+                "If no info is found, return the prior state unchanged. "
+                "Each time, return ONLY valid JSON with this format:\n"
+                "{\n"
+                '  "party": {"value": "...", "source_url": "..."},\n'
+                '  "past_positions": [{"value": "...", "source_url": "..."}],\n'
+                '  "stance_summary": [{"value": {"issue": "...", "position": "..."}, "source_url": "..."}]\n'
+                "}"
+            )
+        },
+        {
+            "role": "user",
+            "content": "Start with an empty summary."
+        },
+        {
+            "role": "assistant",
+            "content": json.dumps({
+                "party": {"value": "Unknown", "source_url": ""},
+                "past_positions": [],
+                "stance_summary": []
+            })
+        }
+    ]
 
-    prompt = f"""
-You are an assistant that extracts political candidate information from multiple sources, preserving source URLs.
+    # Flatten all sources into labeled blocks
+    labeled_blocks = []
+    for source_type, entries in req.sources.items():
+        if isinstance(entries, dict):
+            labeled_blocks.append((source_type.upper(), entries))
+        elif isinstance(entries, list):
+            for i, entry in enumerate(entries):
+                labeled_blocks.append((f"{source_type.upper()} {i+1}", entry))
 
-Candidate: {req.name}
-Office: {req.office}
+    # Feed each block incrementally
+    for label, block in labeled_blocks:
+        block_text = f"[{label}] ({block.url})\n{block.text}"
+        messages.append({"role": "user", "content": block_text})
 
-Sources:
-\"\"\"
-{combined_text}
-\"\"\"
+        response = client.chat.completions.create(
+            model="meta/llama-3.3-70b-instruct",
+            messages=messages,
+            temperature=0.4
+        )
+        reply = response.choices[0].message.content.strip()
+        messages.append({"role": "assistant", "content": reply})
 
-Return valid JSON in this format:
 
-{{
-  "party": {{ "value": "Democratic", "source_url": "https://..." }},
-  "past_positions": [
-    {{ "value": "Deputy District Attorney", "source_url": "https://..." }}
-  ],
-  "stance_summary": [
-    {{
-      "value": {{
-        "issue": "Public Schools",
-        "position": "Believes in Wisconsin's history of great public schools."
-      }},
-      "source_url": "https://..."
-    }}
-  ]
-}}
-
-Guidelines:
-- Only use information explicitly found in the sources.
-- Always include the source_url for each data point.
-- Return complete sentences for positions.
-- Return "Unknown" or an empty list where appropriate.
-- Do not include any explanation or commentary — just valid JSON.
-"""
-
-    response = client.chat.completions.create(
-        model="meta/llama-3.3-70b-instruct",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4
-    )
-
-    raw = response.choices[0].message.content.strip()
+    # Parse final response
+    final_response = messages[-1]["content"]
 
     try:
-        json_text = re.search(r"```(?:json)?\n(.*?)```", raw, re.DOTALL)
+        json_text = re.search(r"```(?:json)?\n(.*?)```", final_response, re.DOTALL)
         if json_text:
             parsed = json.loads(json_text.group(1))
         else:
-            parsed = json.loads(raw)
+            parsed = json.loads(final_response)
         return parsed
     except Exception as e:
-        return {
-            "error": "Could not parse response from model",
-            "raw": raw,
-            "exception": str(e)
-        }
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Could not parse final model output",
+                "raw": final_response,
+                "exception": str(e)
+            }
+        )
+
